@@ -4,11 +4,11 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Rate limiter playground — Systems Lab</title>
-    <meta name="description" content="Token bucket, leaky bucket, fixed and sliding windows — the same traffic hitting all four at once. Drag the load, fire a burst, watch the tradeoffs.">
+    <meta name="description" content="Token bucket, leaky bucket, fixed and sliding windows — the same traffic hitting all four at once. Slow it down, fire a burst, watch the tradeoffs.">
 
     <meta property="og:type" content="website">
     <meta property="og:title" content="Rate limiter playground — Systems Lab">
-    <meta property="og:description" content="Four rate-limiting algorithms, one live traffic stream. Watch which absorb bursts, which smooth, which leak at the edges.">
+    <meta property="og:description" content="Four rate-limiting algorithms, one live traffic stream. Slow the playback right down and watch which absorb bursts, which smooth, which leak at the edges.">
     <meta name="twitter:card" content="summary">
 
     <link rel="stylesheet" href="../assets/lab.css">
@@ -23,37 +23,54 @@
         <div class="demo-header">
             <h1>Rate limiter playground</h1>
             <p>
-                One Poisson traffic stream feeds all four algorithms at once, configured to the same
-                budget: <b>L requests per window W</b>. Change the load, fire a burst, and watch how
-                differently each one copes. The bar shows how much each can still accept right now
-                — green means headroom, red means it's about to throttle.
+                One traffic stream feeds all four algorithms at once, on the same budget:
+                <b>L requests per window W</b>. Slow the playback right down to watch a single
+                request land, or crank the load up to see steady-state stress. The scoreboard
+                up top compares all four at a glance — click one to jump to it.
             </p>
         </div>
 
-        <div class="banner ok" id="banner">
-            <span class="b-item">offered load <b id="b-offered">8</b>/s</span>
-            <span class="b-item">sustained limit <b id="b-sustained">5.0</b>/s</span>
-            <span class="b-status ok" id="b-status">under capacity</span>
-        </div>
+        <div class="sticky-zone">
+            <div class="banner ok" id="banner">
+                <span class="b-item">offered load <b id="b-offered">3</b>/s</span>
+                <span class="b-item">sustained limit <b id="b-sustained">5.0</b>/s</span>
+                <span class="b-status ok" id="b-status">under capacity</span>
+            </div>
 
-        <div class="controls">
-            <div class="control">
-                <label>Incoming traffic <b><span id="v-rate">8</span> req/s</b></label>
-                <input type="range" id="rate" min="0" max="40" step="1" value="8">
+            <div class="controls">
+                <div class="controls-top">
+                    <div class="speed">
+                        <span class="speed-label">Speed</span>
+                        <div class="seg" id="speed-seg">
+                            <button type="button" data-speed="0.25" class="active">0.25×</button>
+                            <button type="button" data-speed="0.5">0.5×</button>
+                            <button type="button" data-speed="1">1×</button>
+                            <button type="button" data-speed="2">2×</button>
+                        </div>
+                    </div>
+                    <div class="control-actions">
+                        <button class="primary" id="burst">Fire burst (+20)</button>
+                        <button id="playpause">Pause</button>
+                        <button class="ghost" id="reset">Reset</button>
+                    </div>
+                </div>
+                <div class="controls-sliders">
+                    <div class="control">
+                        <label>Incoming traffic <b><span id="v-rate">3</span> req/s</b></label>
+                        <input type="range" id="rate" min="0" max="40" step="1" value="3">
+                    </div>
+                    <div class="control">
+                        <label>Limit <b><span id="v-limit">5</span> req / window</b></label>
+                        <input type="range" id="limit" min="1" max="20" step="1" value="5">
+                    </div>
+                    <div class="control">
+                        <label>Window <b><span id="v-window">1.0</span> s</b></label>
+                        <input type="range" id="window" min="0.5" max="4" step="0.5" value="1">
+                    </div>
+                </div>
             </div>
-            <div class="control">
-                <label>Limit <b><span id="v-limit">5</span> req / window</b></label>
-                <input type="range" id="limit" min="1" max="20" step="1" value="5">
-            </div>
-            <div class="control">
-                <label>Window <b><span id="v-window">1.0</span> s</b></label>
-                <input type="range" id="window" min="0.5" max="4" step="0.5" value="1">
-            </div>
-            <div class="control control-actions">
-                <button class="primary" id="burst">Fire burst (+20)</button>
-                <button id="playpause">Pause</button>
-                <button class="ghost" id="reset">Reset</button>
-            </div>
+
+            <div class="scoreboard" id="scoreboard"></div>
         </div>
 
         <div class="panels" id="panels"></div>
@@ -100,9 +117,9 @@
             <div class="try">
                 <b>Try this</b>
                 <ul>
-                    <li>Set incoming traffic <em>below</em> the sustained limit — everyone accepts ~100%. That's the easy regime.</li>
-                    <li>Push incoming <em>above</em> the sustained limit and watch drops become unavoidable. No tuning saves you; the offered load is simply too high.</li>
-                    <li>Hit <b>Fire burst</b> repeatedly: token bucket lets the whole spike through, leaky bucket's latency climbs as it buffers, the windows drop whatever's over quota.</li>
+                    <li>Leave it at <b>0.25× speed</b> and watch one request at a time land in each algorithm — the calmest way to see the mechanism.</li>
+                    <li>Push incoming traffic <em>above</em> the sustained limit and watch drops become unavoidable. No tuning saves you; the offered load is simply too high.</li>
+                    <li>Hit <b>Fire burst</b>: token bucket lets the whole spike through, leaky bucket's latency climbs as it buffers, the windows drop whatever's over quota.</li>
                     <li>Set the window to 4s and watch fixed window let a double-burst through right after its reset — then compare the sliding window, which doesn't.</li>
                 </ul>
             </div>
@@ -118,64 +135,10 @@
     (function () {
         'use strict';
         var R = window.Lab;
-        var rand = R.mulberry32(0x51ab);
 
-        var cfg = { rate: 8, limit: 5, window: 1 };
+        var cfg = { rate: 3, limit: 5, window: 1, speed: 0.25 };
 
-        /* --- The four limiters. Each: tick(dt), accept()->bool, head()->0..1, gauge(), sub() --- */
-
-        function tokenBucket() {
-            return {
-                name: 'Token bucket', note: 'bursts pass instantly',
-                how: 'Tokens drip into a bucket at the sustained rate, up to a <b>capacity</b>. Each request spends one token. A full bucket lets an <b>entire burst</b> through at once; once empty, it throttles down to the drip rate.',
-                tokens: cfg.limit,
-                reset: function () { this.tokens = cfg.limit; },
-                tick: function (dt) {
-                    var refill = cfg.limit / cfg.window;               // tokens per second
-                    this.tokens = Math.min(cfg.limit, this.tokens + refill * dt);
-                },
-                accept: function () {
-                    if (this.tokens >= 1) { this.tokens -= 1; return true; }
-                    return false;
-                },
-                head: function () { return this.tokens / cfg.limit; },
-                gauge: function () { return this.tokens.toFixed(1) + ' / ' + cfg.limit + ' tokens'; },
-                sub: function () { return ''; },
-                status: function () {
-                    var n = Math.floor(this.tokens);
-                    if (n >= 1) return n + ' token' + (n === 1 ? '' : 's') + ' ready — a burst would pass';
-                    return 'Empty — accepting only at the refill rate';
-                }
-            };
-        }
-
-        function leakyBucket() {
-            return {
-                name: 'Leaky bucket', note: 'smooths output, adds latency',
-                how: 'Requests queue in a bucket that <b>leaks at a constant rate</b>. Output is perfectly smooth no matter how bursty the input — but queued requests wait, so bursts become <b>added latency</b>. Overflow past capacity is dropped.',
-                level: 0,                                              // queued work units
-                reset: function () { this.level = 0; },
-                tick: function (dt) {
-                    var leak = cfg.limit / cfg.window;                 // released per second
-                    this.level = Math.max(0, this.level - leak * dt);
-                },
-                accept: function () {
-                    if (this.level + 1 <= cfg.limit) { this.level += 1; return true; }
-                    return false;
-                },
-                head: function () { return (cfg.limit - this.level) / cfg.limit; },
-                gauge: function () { return 'backlog ' + this.level.toFixed(1) + ' / ' + cfg.limit; },
-                sub: function () {
-                    var leak = cfg.limit / cfg.window;
-                    return '≈ ' + Math.round((this.level / leak) * 1000) + 'ms latency';
-                },
-                status: function () {
-                    if (this.level >= cfg.limit) return 'Bucket full — dropping the overflow';
-                    if (this.level > 0.05) return 'Buffering the burst — draining at a steady rate';
-                    return 'Empty — passing through instantly';
-                }
-            };
-        }
+        /* --- The four limiters. Each: tick(dt), accept()->bool, head()->0..1, gauge(), sub(), status() --- */
 
         function fixedWindow() {
             return {
@@ -231,31 +194,120 @@
             };
         }
 
+        function tokenBucket() {
+            return {
+                name: 'Token bucket', note: 'bursts pass instantly',
+                how: 'Tokens drip into a bucket at the sustained rate, up to a <b>capacity</b>. Each request spends one token. A full bucket lets an <b>entire burst</b> through at once; once empty, it throttles down to the drip rate.',
+                tokens: cfg.limit,
+                reset: function () { this.tokens = cfg.limit; },
+                tick: function (dt) {
+                    var refill = cfg.limit / cfg.window;               // tokens per second
+                    this.tokens = Math.min(cfg.limit, this.tokens + refill * dt);
+                },
+                accept: function () {
+                    if (this.tokens >= 1) { this.tokens -= 1; return true; }
+                    return false;
+                },
+                head: function () { return this.tokens / cfg.limit; },
+                gauge: function () { return this.tokens.toFixed(1) + ' / ' + cfg.limit + ' tokens'; },
+                sub: function () { return ''; },
+                status: function () {
+                    var n = Math.floor(this.tokens);
+                    if (n >= 1) return n + ' token' + (n === 1 ? '' : 's') + ' ready — a burst would pass';
+                    return 'Empty — accepting only at the refill rate';
+                }
+            };
+        }
+
+        function leakyBucket() {
+            return {
+                name: 'Leaky bucket', note: 'smooths output, adds latency',
+                how: 'Requests queue in a bucket that <b>leaks at a constant rate</b>. Output is perfectly smooth no matter how bursty the input — but queued requests wait, so bursts become <b>added latency</b>. Overflow past capacity is dropped.',
+                level: 0,                                              // queued work units
+                reset: function () { this.level = 0; },
+                tick: function (dt) {
+                    var leak = cfg.limit / cfg.window;                 // released per second
+                    this.level = Math.max(0, this.level - leak * dt);
+                },
+                accept: function () {
+                    if (this.level + 1 <= cfg.limit) { this.level += 1; return true; }
+                    return false;
+                },
+                head: function () { return (cfg.limit - this.level) / cfg.limit; },
+                gauge: function () { return 'backlog ' + this.level.toFixed(1) + ' / ' + cfg.limit; },
+                sub: function () {
+                    var leak = cfg.limit / cfg.window;
+                    return '≈ ' + Math.round((this.level / leak) * 1000) + 'ms latency';
+                },
+                status: function () {
+                    if (this.level >= cfg.limit) return 'Bucket full — dropping the overflow';
+                    if (this.level > 0.05) return 'Buffering the burst — draining at a steady rate';
+                    return 'Empty — passing through instantly';
+                }
+            };
+        }
+
         // Ordered simplest → most sophisticated, so the ideas build on each other.
         var limiters = [fixedWindow(), slidingWindow(), tokenBucket(), leakyBucket()];
-        limiters.forEach(function (l) { l.acc = 0; l.rej = 0; });
+        limiters.forEach(function (l) { l.acc = 0; l.rej = 0; l.hEMA = null; });
 
-        /* --- Build panels --- */
+        var STRIP_COLORS = { accept: '#34d399', reject: '#f87171' };
+        function stateColor(st) {
+            return st === 'accepting' ? '#34d399' : st === 'throttling' ? '#fbbf24' : '#f87171';
+        }
+
+        function recentAcceptPct(l, look) {
+            var evs = l.strip.events;
+            var n = evs.length;
+            var span = Math.min(look, n);
+            if (!span) return 100;
+            var ok = 0;
+            for (var i = n - span; i < n; i++) if (evs[i] === 'accept') ok++;
+            return Math.round(ok / span * 100);
+        }
+
+        // Stable state read: smoothed headroom + recent reject fraction, so badges don't flicker.
+        function stateOf(l) {
+            var evs = l.strip.events, n = evs.length, look = Math.min(12, n), rej = 0;
+            for (var i = n - look; i < n; i++) if (evs[i] === 'reject') rej++;
+            var rf = look ? rej / look : 0;
+            var h = (l.hEMA == null) ? 1 : l.hEMA;
+            if (rf >= 0.35) return 'dropping';
+            if (rf >= 0.1 || h < 0.35) return 'throttling';
+            return 'accepting';
+        }
+
+        /* --- Build big panels --- */
         var panelsEl = document.getElementById('panels');
-        limiters.forEach(function (l) {
+        limiters.forEach(function (l, idx) {
             var p = document.createElement('div');
             p.className = 'panel';
+            p.id = 'panel-' + idx;
             p.innerHTML =
-                '<div class="panel-head"><div class="panel-titles">' +
-                '<span class="panel-name">' + l.name + '</span>' +
+                '<div class="panel-head">' +
+                '<span class="state-badge" data-badge>ACCEPTING</span>' +
+                '<div class="panel-titles"><span class="panel-name">' + l.name + '</span>' +
                 '<span class="panel-note">' + l.note + '</span></div>' +
                 '<button class="panel-info-btn" data-info aria-label="How it works" aria-expanded="false">i</button></div>' +
                 '<div class="how" data-how hidden>' + l.how + '</div>' +
+                '<div class="panel-body">' +
+                '<div class="panel-viz">' +
                 '<div class="gauge-label"><span data-gauge></span><span class="gauge-sub" data-sub></span></div>' +
                 '<div class="gauge"><div class="gauge-fill" data-fill></div></div>' +
                 (l.hasWindow ? '<div class="wintimer"><div class="wintimer-fill" data-win></div></div>' : '') +
                 '<div class="panel-status"><span class="st-dot" data-stdot></span><span data-status></span></div>' +
-                '<div class="panel-stats"><span class="stat-big" data-rate>100%</span>' +
-                '<span class="stat-sub"><b data-acc>0</b> ok · <b data-rej>0</b> dropped</span></div>' +
+                '</div>' +
+                '<div class="panel-readout">' +
+                '<span class="stat-big" data-rate>100%</span>' +
+                '<span class="stat-label">accepted</span>' +
+                '<span class="stat-sub"><b data-acc>0</b> ok · <b data-rej>0</b> dropped</span>' +
+                '</div>' +
+                '</div>' +
                 '<canvas class="strip" data-strip></canvas>' +
                 '<div class="strip-caption">recent requests →</div>';
             panelsEl.appendChild(p);
             l.el = {
+                badge: p.querySelector('[data-badge]'),
                 gauge: p.querySelector('[data-gauge]'),
                 sub: p.querySelector('[data-sub]'),
                 fill: p.querySelector('[data-fill]'),
@@ -276,16 +328,30 @@
             l.strip = new R.Strip(p.querySelector('[data-strip]'), { max: 160 });
         });
 
-        var STRIP_COLORS = { accept: '#34d399', reject: '#f87171' };
-        function colorFor(h) {
-            if (h > 0.5) return '#34d399';
-            if (h > 0.2) return '#fbbf24';
-            return '#f87171';
-        }
+        /* --- Build scoreboard (glanceable comparison, click to jump) --- */
+        var scoreEl = document.getElementById('scoreboard');
+        limiters.forEach(function (l, idx) {
+            var s = document.createElement('button');
+            s.type = 'button';
+            s.className = 'score';
+            s.innerHTML =
+                '<span class="score-dot" data-sdot></span>' +
+                '<span class="score-name">' + l.name.split(' ')[0] + '</span>' +
+                '<span class="score-rate" data-srate>100%</span>';
+            s.addEventListener('click', function () {
+                document.getElementById('panel-' + idx).scrollIntoView({ behavior: 'smooth', block: 'start' });
+            });
+            scoreEl.appendChild(s);
+            l.score = { dot: s.querySelector('[data-sdot]'), rate: s.querySelector('[data-srate]'), root: s };
+        });
 
-        /* --- Arrival process --- */
+        /* --- Arrival process (all times are simulated seconds) --- */
         var now = 0, nextArrival = 0;
-        function schedule() { nextArrival = now + R.nextArrivalGap(rand, cfg.rate); }
+        function nextGap() {
+            if (cfg.rate <= 0) return Infinity;
+            return 1 / cfg.rate;
+        }
+        function schedule() { nextArrival = now + nextGap(); }
         schedule();
 
         function fireArrival() {
@@ -298,8 +364,9 @@
         }
 
         function step(dt) {
-            now += dt;
-            for (var i = 0; i < limiters.length; i++) limiters[i].tick(dt);
+            var s = dt * cfg.speed;           // playback speed scales simulated time
+            now += s;
+            for (var i = 0; i < limiters.length; i++) limiters[i].tick(s);
             var guard = 0;
             while (now >= nextArrival && guard < 500) { fireArrival(); schedule(); guard++; }
             render();
@@ -327,18 +394,29 @@
             for (var i = 0; i < limiters.length; i++) {
                 var l = limiters[i];
                 var h = R.clamp01(l.head());
+                l.hEMA = (l.hEMA == null) ? h : l.hEMA + (h - l.hEMA) * 0.06;
+                var st = stateOf(l);
+                var col = stateColor(st);
+
                 l.el.fill.style.width = (h * 100).toFixed(1) + '%';
-                l.el.fill.style.background = colorFor(h);
+                l.el.fill.style.background = col;
                 l.el.gauge.textContent = l.gauge();
                 l.el.sub.textContent = l.sub();
                 l.el.status.textContent = l.status();
-                l.el.stdot.style.background = colorFor(h);
+                l.el.stdot.style.background = col;
+                l.el.badge.textContent = st.toUpperCase();
+                l.el.badge.className = 'state-badge ' + st;
                 if (l.el.win && l.windowProgress) l.el.win.style.width = (l.windowProgress() * 100).toFixed(1) + '%';
-                var total = l.acc + l.rej;
-                l.el.rate.textContent = (total ? Math.round(l.acc / total * 100) : 100) + '%';
+
+                var pct = recentAcceptPct(l, 24);
+                l.el.rate.textContent = pct + '%';
                 l.el.acc.textContent = l.acc;
                 l.el.rej.textContent = l.rej;
                 l.strip.draw(STRIP_COLORS);
+
+                l.score.dot.style.background = col;
+                l.score.rate.textContent = pct + '%';
+                l.score.root.className = 'score ' + st;
             }
         }
 
@@ -359,6 +437,14 @@
         bindSlider('limit', 'limit', 'v-limit', function (v) { return v.toFixed(0); });
         bindSlider('window', 'window', 'v-window', function (v) { return v.toFixed(1); });
 
+        var speedBtns = document.querySelectorAll('#speed-seg button');
+        speedBtns.forEach(function (b) {
+            b.addEventListener('click', function () {
+                cfg.speed = parseFloat(b.dataset.speed);
+                speedBtns.forEach(function (x) { x.classList.toggle('active', x === b); });
+            });
+        });
+
         document.getElementById('burst').addEventListener('click', function () {
             for (var i = 0; i < 20; i++) fireArrival();
             render();
@@ -371,8 +457,8 @@
         });
 
         document.getElementById('reset').addEventListener('click', function () {
-            limiters.forEach(function (l) { l.reset(); l.acc = 0; l.rej = 0; l.strip.clear(); });
-            now = 0; rand = R.mulberry32(0x51ab); schedule(); render();
+            limiters.forEach(function (l) { l.reset(); l.acc = 0; l.rej = 0; l.hEMA = null; l.strip.clear(); });
+            now = 0; schedule(); render();
         });
 
         window.addEventListener('keydown', function (e) {
