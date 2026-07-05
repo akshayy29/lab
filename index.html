@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Akshay Yewale — Systems Lab</title>
+    <meta name="description" content="A living notebook of interactive distributed-systems demos by Akshay Yewale — rate limiters, consistent hashing, retry storms, and more. Drag the sliders, watch the tradeoffs.">
+    <meta name="author" content="Akshay Yewale">
+
+    <meta property="og:type" content="website">
+    <meta property="og:title" content="Akshay Yewale — Systems Lab">
+    <meta property="og:description" content="Interactive demos of distributed systems fundamentals. Drag the sliders, push each system into its failure regime, watch what breaks.">
+    <meta name="twitter:card" content="summary">
+
+    <link rel="stylesheet" href="assets/lab.css">
+</head>
+<body>
+    <div class="wrap">
+        <div class="topbar">
+            <div class="brand"><span class="dot"></span> Systems Lab</div>
+            <nav class="topnav">
+                <a href="https://github.com/akshayy29" target="_blank" rel="noopener">GitHub</a>
+                <a href="https://linkedin.com/in/yewaleakshay" target="_blank" rel="noopener">LinkedIn</a>
+                <a href="mailto:hello@akshayy.dev">Email</a>
+            </nav>
+        </div>
+
+        <div class="lead">
+            <div class="kicker">First principles, made interactive</div>
+            <h1>See the tradeoffs, don't just read about them</h1>
+            <p>
+                Small, self-contained demos of the systems ideas worth keeping sharp. Every one
+                lets you drag the load up, change the strategy, and push it into the regime where
+                it breaks — because the intuition lives at the cliff edge, not the happy path.
+            </p>
+            <p class="byline">
+                A living notebook by <b>Akshay Yewale</b> — backend engineer working on
+                distributed systems at scale, based in London.
+                <a href="mailto:hello@akshayy.dev">Get in touch ↗</a>
+            </p>
+        </div>
+
+        <div class="demo-grid">
+            <a class="demo-card live" href="rate-limiter/">
+                <div class="card-head">
+                    <h2>Rate limiter playground</h2>
+                    <span class="status live"><span class="s-dot"></span> live</span>
+                </div>
+                <p>Fixed and sliding windows, token and leaky buckets — the same traffic hitting all four at once. Watch which absorb bursts, which smooth, which leak at the edges.</p>
+            </a>
+
+            <div class="demo-card soon">
+                <div class="card-head">
+                    <h2>Consistent hashing</h2>
+                    <span class="status"><span class="s-dot"></span> planned</span>
+                </div>
+                <p>Add a node, watch only 1/N of the keys move. Virtual nodes fix the skew in front of you.</p>
+            </div>
+
+            <div class="demo-card soon">
+                <div class="card-head">
+                    <h2>Retry storm</h2>
+                    <span class="status"><span class="s-dot"></span> planned</span>
+                </div>
+                <p>Naive retries amplify load during an outage. Add jitter, backoff, and a retry budget and watch it tame.</p>
+            </div>
+
+            <div class="demo-card soon">
+                <div class="card-head">
+                    <h2>Cache eviction</h2>
+                    <span class="status"><span class="s-dot"></span> planned</span>
+                </div>
+                <p>LRU vs LFU vs FIFO on different workloads, with a live hit rate. Spot the anomalies.</p>
+            </div>
+
+            <div class="demo-card soon">
+                <div class="card-head">
+                    <h2>Load balancer</h2>
+                    <span class="status"><span class="s-dot"></span> planned</span>
+                </div>
+                <p>Round-robin vs least-connections vs power-of-two-choices. The last one is almost magic.</p>
+            </div>
+
+            <div class="demo-card soon">
+                <div class="card-head">
+                    <h2>Queue &amp; backpressure</h2>
+                    <span class="status"><span class="s-dot"></span> planned</span>
+                </div>
+                <p>Little's Law made physical. Arrival past service rate, and the queue grows without bound.</p>
+            </div>
+
+            <div class="demo-card soon">
+                <div class="card-head">
+                    <h2>Circuit breaker</h2>
+                    <span class="status"><span class="s-dot"></span> planned</span>
+                </div>
+                <p>Closed, open, half-open. Trip it, let it cool down, watch it probe for recovery.</p>
+            </div>
+
+            <div class="demo-card soon">
+                <div class="card-head">
+                    <h2>Partition hot keys</h2>
+                    <span class="status"><span class="s-dot"></span> planned</span>
+                </div>
+                <p>Pick a bad partition key and watch one shard go red. Then shard the writes and cool it down.</p>
+            </div>
+        </div>
+
+        <footer class="lab-footer">
+            Built as one static file per demo — no framework, no build step.<br>
+            Akshay Yewale ·
+            <a href="mailto:hello@akshayy.dev">hello@akshayy.dev</a> ·
+            <a href="https://github.com/akshayy29" target="_blank" rel="noopener">GitHub</a> ·
+            <a href="https://linkedin.com/in/yewaleakshay" target="_blank" rel="noopener">LinkedIn</a>
+        </footer>
+    </div>
+</body>
+</html>
