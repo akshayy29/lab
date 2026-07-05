@@ -1,0 +1,5 @@
+# Cloudflare Pages — static site, no build step.
+# The whole site is served from the repo root (index.html is the entry point).
+name = "lab"
+compatibility_date = "2025-01-01"
+pages_build_output_dir = "."
