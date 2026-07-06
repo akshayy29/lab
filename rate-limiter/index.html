@@ -195,7 +195,7 @@
 
         function tokenBucket() {
             return {
-                name: 'Token bucket', note: 'bursts pass instantly',
+                name: 'Token bucket', note: 'bursts pass instantly', hasChamber: 'jar',
                 how: 'Tokens drip into a bucket at the sustained rate, up to a <b>capacity</b>. Each request spends one token. A full bucket lets an <b>entire burst</b> through at once; once empty, it throttles down to the drip rate.',
                 tokens: cfg.limit,
                 reset: function () { this.tokens = cfg.limit; },
@@ -208,7 +208,9 @@
                     return false;
                 },
                 head: function () { return this.tokens / cfg.limit; },
-                gauge: function () { return this.tokens.toFixed(1) + ' / ' + cfg.limit + ' tokens'; },
+                // Truncate rather than round — "5.0 tokens" must never appear
+                // while status() (which floors) still says only 4 are ready.
+                gauge: function () { return (Math.floor(this.tokens * 10) / 10).toFixed(1) + ' / ' + cfg.limit + ' tokens'; },
                 sub: function () { return ''; },
                 status: function () {
                     var n = Math.floor(this.tokens);
@@ -395,6 +397,138 @@
             this.pool.draw(ctx);
         };
 
+        /**
+         * Token bucket chamber: a jar of discrete coins with a drip refill.
+         * Unlike the timeline chambers, the coin stack has no history to track —
+         * it's redrawn fresh every frame as a pure function of the live token
+         * count. Only the drip-fall, consumption-pop, and request-dot flights
+         * are animated (wall-clock, per spec §2.3).
+         */
+        function JarChamber(canvas, opts) {
+            this.canvas = canvas;
+            this.ctx = canvas.getContext('2d');
+            this.getW = opts.getW;
+            this.getL = opts.getL;
+            this.getTokens = opts.getTokens;
+            this.pool = new R.DotPool(30);
+            this._dripPhase = 0; // wraps 0..1; each wrap is one refill tick, whether or not the jar has room
+            this._resize();
+            var self = this;
+            window.addEventListener('resize', function () { self._resize(); });
+        }
+        JarChamber.prototype._resize = function () {
+            var dpr = Math.min(window.devicePixelRatio || 1, 2);
+            var r = this.canvas.getBoundingClientRect();
+            this.canvas.width = Math.max(1, r.width * dpr);
+            this.canvas.height = Math.max(1, r.height * dpr);
+            this.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+            this.w = r.width; this.h = r.height;
+            this.jarW = Math.min(72, this.w * 0.24);
+            this.jarH = Math.min(100, this.h * 0.74);
+            this.jarX = this.w * 0.62;
+            this.jarTop = this.h / 2 - this.jarH / 2;
+            this.jarBottom = this.jarTop + this.jarH;
+            this.laneY = this.h / 2;
+        };
+        JarChamber.prototype._dotRadius = function () {
+            var base = window.innerWidth < 640 ? 4 : 5;
+            var slotH = this.jarH / Math.max(1, this.getL());
+            return Math.max(2, Math.min(base, slotH / 2 - 1));
+        };
+        JarChamber.prototype._coinY = function (slot) {
+            var L = this.getL();
+            var slotH = this.jarH / L;
+            return this.jarBottom - (slot + 1) * slotH + slotH / 2;
+        };
+        JarChamber.prototype.onArrival = function (ok, simNow, slot, delay) {
+            var self = this;
+            var r = this._dotRadius();
+            var dot = new R.Dot({ x0: 0, y0: this.laneY, x1: this.jarX, y1: this.laneY, r: r, color: '#38bdf8', flightDur: 0.3, delay: delay || 0 });
+            dot.onLanded = function () {
+                if (ok) {
+                    dot.exit(self.w, self.laneY, '#34d399', 0.25);
+                    // Consumption pop: a brief marker at the coin slot just vacated.
+                    var poppedSlot = Math.max(0, Math.floor(self.getTokens()));
+                    var pop = new R.Dot({ x0: self.jarX, y0: self._coinY(poppedSlot), x1: self.jarX, y1: self._coinY(poppedSlot), r: r, color: '#34d399', flightDur: 0.001 });
+                    pop.state = 'landed';
+                    pop.popOut(0.15);
+                    self.pool.spawn(pop);
+                } else {
+                    dot.reject('#f87171');
+                }
+            };
+            this.pool.spawn(dot);
+        };
+        JarChamber.prototype.update = function (simNow, wallDt, simDt) {
+            this.pool.update(wallDt);
+            var L = this.getL(), W = this.getW();
+            var refillRate = L / W; // tokens per sim-second
+            this._dripPhase += refillRate * simDt;
+            var guard = 0;
+            while (this._dripPhase >= 1 && guard < 50) {
+                this._dripPhase -= 1;
+                this._spawnDrip();
+                guard++;
+            }
+        };
+        JarChamber.prototype._spawnDrip = function () {
+            var tokens = this.getTokens();
+            var L = this.getL();
+            var r = this._dotRadius();
+            var dripOriginY = this.jarTop - 18;
+            if (tokens < L - 1e-6) {
+                var slot = Math.floor(tokens);
+                var drip = new R.Dot({ x0: this.jarX, y0: dripOriginY, x1: this.jarX, y1: this._coinY(slot), r: r, color: '#34d399', flightDur: 0.15 });
+                drip.onLanded = function () { drip.instantComplete(); }; // the live redraw already shows the coin
+                this.pool.spawn(drip);
+            } else {
+                // Jar's full — this refill is wasted. Bounce off the rim and vanish.
+                var bounce = new R.Dot({ x0: this.jarX, y0: dripOriginY, x1: this.jarX, y1: this.jarTop + 4, r: r, color: '#5c7089', flightDur: 0.1 });
+                bounce.onLanded = function () { bounce.popOut(0.15); };
+                this.pool.spawn(bounce);
+            }
+        };
+        JarChamber.prototype.reset = function () {
+            this._dripPhase = 0;
+            this.pool.clear();
+        };
+        JarChamber.prototype.draw = function () {
+            var ctx = this.ctx;
+            ctx.clearRect(0, 0, this.w, this.h);
+
+            ctx.strokeStyle = 'rgba(139,160,189,0.5)';
+            ctx.lineWidth = 1.5;
+            var jarLeft = this.jarX - this.jarW / 2, jarRight = this.jarX + this.jarW / 2;
+            var rad = 6;
+            ctx.beginPath();
+            ctx.moveTo(jarLeft, this.jarTop);
+            ctx.lineTo(jarLeft, this.jarBottom - rad);
+            ctx.quadraticCurveTo(jarLeft, this.jarBottom, jarLeft + rad, this.jarBottom);
+            ctx.lineTo(jarRight - rad, this.jarBottom);
+            ctx.quadraticCurveTo(jarRight, this.jarBottom, jarRight, this.jarBottom - rad);
+            ctx.lineTo(jarRight, this.jarTop);
+            ctx.stroke();
+
+            // coin stack — pure function of the live token count, no history needed
+            var tokens = this.getTokens();
+            var whole = Math.floor(tokens);
+            var frac = tokens - whole;
+            var r = this._dotRadius();
+            ctx.fillStyle = '#34d399';
+            for (var i = 0; i < whole; i++) {
+                var cy = this._coinY(i);
+                ctx.beginPath(); ctx.arc(this.jarX, cy, r, 0, Math.PI * 2); ctx.fill();
+            }
+            if (frac > 0.02) {
+                ctx.globalAlpha = frac;
+                var cy2 = this._coinY(whole);
+                ctx.beginPath(); ctx.arc(this.jarX, cy2, r, 0, Math.PI * 2); ctx.fill();
+                ctx.globalAlpha = 1;
+            }
+
+            this.pool.draw(ctx);
+        };
+
         var STRIP_COLORS = { accept: '#34d399', reject: '#f87171', out: '#38bdf8' };
         function stateColor(st) {
             return st === 'accepting' ? '#34d399' : st === 'throttling' ? '#fbbf24' : '#f87171';
@@ -478,11 +612,17 @@
             });
             l.strip = new R.TimeStrip(p.querySelector('[data-strip]'), { span: 30 });
 
-            if (l.hasChamber) {
+            if (l.hasChamber === 'grid' || l.hasChamber === 'lens') {
                 l.chamber = new TimelineChamber(p.querySelector('[data-chamber]'), {
                     mode: l.hasChamber,
                     getW: function () { return cfg.window; },
                     getL: function () { return cfg.limit; }
+                });
+            } else if (l.hasChamber === 'jar') {
+                l.chamber = new JarChamber(p.querySelector('[data-chamber]'), {
+                    getW: function () { return cfg.window; },
+                    getL: function () { return cfg.limit; },
+                    getTokens: function () { return l.tokens; }
                 });
             }
         });
@@ -529,7 +669,9 @@
                 if (ok) l.strip.pushOut(now);
                 // Timeline chambers stack each accepted dot into a slot —
                 // currentSlot() reads state that accept() already updated above.
-                if (l.chamber) l.chamber.onArrival(ok, now, ok ? l.currentSlot() : null, delay);
+                // Not every chamber type uses a slot (the jar derives coin
+                // position from the live token count instead).
+                if (l.chamber) l.chamber.onArrival(ok, now, (ok && l.currentSlot) ? l.currentSlot() : null, delay);
             }
         }
 
@@ -540,8 +682,10 @@
             var guard = 0;
             while (now >= nextArrival && guard < 500) { fireArrival(); schedule(); guard++; }
             // Chamber animation is wall-clock driven (dt, unscaled) — see spec §2.3.
+            // `s` (sim dt) is also passed for chambers with their own sim-time-based
+            // clocks (e.g. the jar's drip metronome); timeline chambers ignore it.
             for (var j = 0; j < limiters.length; j++) {
-                if (limiters[j].chamber) limiters[j].chamber.update(now, dt);
+                if (limiters[j].chamber) limiters[j].chamber.update(now, dt, s);
             }
             render();
         }

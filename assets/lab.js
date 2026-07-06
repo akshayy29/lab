@@ -143,6 +143,7 @@
             this.flightDur = opts.flightDur != null ? opts.flightDur : 0.3;
             this.onLanded = opts.onLanded || null;
             this.delay = opts.delay || 0; // wall-clock seconds before flight begins (burst fan-out, spec §5.1)
+            this._reduced = false; // set by DotPool when prefers-reduced-motion is active
         }
         retarget(x, y, dur) {
             this._tx0 = this.x; this._ty0 = this.y;
@@ -151,18 +152,33 @@
             this.t = 0;
             this.state = 'retarget';
         }
+        /** Reduced motion: no tween, just sit still showing the outcome color, then disappear. */
+        _reducedFlash(color, dur) {
+            this.color = color;
+            this.state = 'flash'; this.t = 0;
+            this._flashDur = dur || 0.2;
+        }
         exit(toX, toY, color, dur) {
+            if (color) this.color = color;
+            if (this._reduced) { this._reducedFlash(this.color, 0.2); return; }
             this.state = 'exiting'; this.t = 0;
             this._ex0 = this.x; this._ey0 = this.y;
             this._ex1 = toX; this._ey1 = toY != null ? toY : this.y;
             this._exitDur = dur != null ? dur : 0.25;
-            if (color) this.color = color;
         }
         reject(color) {
+            if (this._reduced) { this._reducedFlash(color || '#f87171', 0.2); return; }
             this.state = 'rejecting'; this.t = 0;
             this._rx0 = this.x; this._ry0 = this.y;
             this._rdx = (Math.random() < 0.5 ? -1 : 1) * (8 + Math.random() * 8);
             this.color = color || '#f87171';
+        }
+        /** Shrink-and-fade in place — a consumed token coin, a drip bouncing off a full rim, etc. */
+        popOut(dur) {
+            if (this._reduced) { this._reducedFlash(this.color, 0.15); return; }
+            this.state = 'popping'; this.t = 0;
+            this._popDur = dur != null ? dur : 0.15;
+            this._popR0 = this.r;
         }
         /** Skip straight to the final visual state — used under prefers-reduced-motion. */
         settle() {
@@ -194,6 +210,7 @@
                 return true;
             }
             if (this.state === 'landed') return true;
+            if (this.state === 'flash') return this.t < this._flashDur;
             if (this.state === 'exiting') {
                 const p = Math.min(1, this.t / this._exitDur);
                 const e = ease.inCubic(p);
@@ -207,6 +224,12 @@
                 this.x = this._rx0 + this._rdx * Math.min(1, this.t / 0.25);
                 this.y = this._ry0 + 46 * p * p;
                 this.alpha = 1 - p;
+                return p < 1;
+            }
+            if (this.state === 'popping') {
+                const p = Math.min(1, this.t / this._popDur);
+                this.alpha = 1 - p;
+                this.r = this._popR0 * (1 - p * 0.5);
                 return p < 1;
             }
             return false;
@@ -234,7 +257,7 @@
             this.reduced = prefersReducedMotion();
         }
         spawn(dot) {
-            if (this.reduced) dot.settle();
+            if (this.reduced) { dot._reduced = true; dot.settle(); }
             if (this.items.length >= this.cap) {
                 const oldest = this.items.shift();
                 if (oldest) oldest.instantComplete();
