@@ -222,27 +222,38 @@
 
         function leakyBucket() {
             return {
-                name: 'Leaky bucket', note: 'smooths output, adds latency',
-                how: 'Requests queue in a bucket that <b>leaks at a constant rate</b>. Output is perfectly smooth no matter how bursty the input — but queued requests wait, so bursts become <b>added latency</b>. Overflow past capacity is dropped.',
-                level: 0,                                              // queued work units
-                reset: function () { this.level = 0; },
+                name: 'Leaky bucket', note: 'smooths output, adds latency', hasChamber: 'queue',
+                how: 'Requests wait in a line of at most <b>L</b> slots. A gate opens on a steady metronome — once every <b>W / L</b> seconds — and releases exactly one waiting request, no matter how bursty the arrivals were. That steady output is the whole point; the cost is the wait itself, and a queue that\'s already full drops anything new.',
+                queue: [], gatePhase: 0, simNow: 0,           // queue holds arrival timestamps, front = queue[0]
+                reset: function () { this.queue = []; this.gatePhase = 0; this.simNow = 0; },
                 tick: function (dt) {
-                    var leak = cfg.limit / cfg.window;                 // released per second
-                    this.level = Math.max(0, this.level - leak * dt);
+                    this.simNow += dt;
+                    var period = cfg.window / cfg.limit;              // seconds between departures
+                    this.gatePhase += dt;
+                    var guard = 0;
+                    while (this.gatePhase >= period && this.queue.length > 0 && guard < 100) {
+                        this.gatePhase -= period;
+                        this.queue.shift();
+                        if (this._onDepart) this._onDepart(this.simNow);
+                        guard++;
+                    }
+                    // An empty queue doesn't "bank" leak credit while idle — the gate
+                    // has nothing to release, so its timer doesn't advance either.
+                    if (this.queue.length === 0) this.gatePhase = 0;
                 },
                 accept: function () {
-                    if (this.level + 1 <= cfg.limit) { this.level += 1; return true; }
+                    if (this.queue.length < cfg.limit) { this.queue.push(this.simNow); return true; }
                     return false;
                 },
-                head: function () { return (cfg.limit - this.level) / cfg.limit; },
-                gauge: function () { return 'backlog ' + this.level.toFixed(1) + ' / ' + cfg.limit; },
+                head: function () { return (cfg.limit - this.queue.length) / cfg.limit; },
+                gauge: function () { return 'queue ' + this.queue.length + ' / ' + cfg.limit; },
                 sub: function () {
-                    var leak = cfg.limit / cfg.window;
-                    return '≈ ' + Math.round((this.level / leak) * 1000) + 'ms latency';
+                    var period = cfg.window / cfg.limit;
+                    return '≈ ' + Math.round(this.queue.length * period * 1000) + 'ms latency';
                 },
                 status: function () {
-                    if (this.level >= cfg.limit) return 'Bucket full — dropping the overflow';
-                    if (this.level > 0.05) return 'Buffering the burst — draining at a steady rate';
+                    if (this.queue.length >= cfg.limit) return 'Queue full — dropping the overflow';
+                    if (this.queue.length > 0) return 'Waiting in line — draining at a steady rate';
                     return 'Empty — passing through instantly';
                 }
             };
@@ -529,6 +540,109 @@
             this.pool.draw(ctx);
         };
 
+        /**
+         * Leaky bucket chamber: a line of waiting dots in front of a metronome
+         * gate. Unlike the jar, occupants ARE tracked as an ordered list of live
+         * Dot objects — their visual position depends on FIFO order, not just a
+         * count. Departures are driven by the limiter's own gate timer via the
+         * releaseFront() callback, so the visual queue and the simulation's
+         * discrete queue are the same fact, viewed twice.
+         */
+        function QueueChamber(canvas, opts) {
+            this.canvas = canvas;
+            this.ctx = canvas.getContext('2d');
+            this.getW = opts.getW;
+            this.getL = opts.getL;
+            this.pool = new R.DotPool(30);
+            this.waiting = [];              // ordered Dot objects, front = waiting[0] (closest to the gate)
+            this._wallClock = 0;
+            this._gateFlashAt = -Infinity;
+            this._resize();
+            var self = this;
+            window.addEventListener('resize', function () { self._resize(); });
+        }
+        QueueChamber.prototype._resize = function () {
+            var dpr = Math.min(window.devicePixelRatio || 1, 2);
+            var r = this.canvas.getBoundingClientRect();
+            this.canvas.width = Math.max(1, r.width * dpr);
+            this.canvas.height = Math.max(1, r.height * dpr);
+            this.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+            this.w = r.width; this.h = r.height;
+            this.gateX = this.w * 0.70;
+            this.laneY = this.h / 2;
+            this.areaLeft = 10;
+            this.areaRight = this.gateX - 14;
+        };
+        QueueChamber.prototype._dotRadius = function () {
+            var base = window.innerWidth < 640 ? 4 : 5;
+            var slotW = (this.areaRight - this.areaLeft) / Math.max(1, this.getL());
+            return Math.max(2, Math.min(base, slotW / 2 - 1));
+        };
+        QueueChamber.prototype._slotX = function (index) {
+            var L = this.getL();
+            var slotW = (this.areaRight - this.areaLeft) / L;
+            return this.areaRight - (index + 0.5) * slotW;
+        };
+        QueueChamber.prototype.onArrival = function (ok, simNow, slot, delay) {
+            var r = this._dotRadius();
+            if (ok) {
+                var idx = this.waiting.length;
+                var dot = new R.Dot({ x0: 0, y0: this.laneY, x1: this._slotX(idx), y1: this.laneY, r: r, color: '#38bdf8', flightDur: 0.3, delay: delay || 0 });
+                this.waiting.push(dot);
+                this.pool.spawn(dot);
+            } else {
+                var dot2 = new R.Dot({ x0: 0, y0: this.laneY, x1: this.gateX - 8, y1: this.laneY, r: r, color: '#38bdf8', flightDur: 0.3, delay: delay || 0 });
+                dot2.onLanded = function () { dot2.reject('#f87171'); };
+                this.pool.spawn(dot2);
+            }
+        };
+        // Called by the limiter's own gate timer the instant it releases the front of the real queue.
+        QueueChamber.prototype.releaseFront = function () {
+            var front = this.waiting.shift();
+            if (front) front.exit(this.w + 10, this.laneY, '#34d399', 0.25);
+            for (var i = 0; i < this.waiting.length; i++) {
+                this.waiting[i].retarget(this._slotX(i), this.laneY, 0.12);
+            }
+            this._gateFlashAt = this._wallClock;
+        };
+        QueueChamber.prototype.update = function (simNow, wallDt) {
+            this._wallClock += wallDt;
+            this.pool.update(wallDt);
+        };
+        QueueChamber.prototype.reset = function () {
+            this.waiting = [];
+            this.pool.clear();
+            this._gateFlashAt = -Infinity;
+        };
+        QueueChamber.prototype.draw = function () {
+            var ctx = this.ctx;
+            ctx.clearRect(0, 0, this.w, this.h);
+
+            var L = this.getL();
+            var r = this._dotRadius();
+            ctx.strokeStyle = 'rgba(139,160,189,0.22)';
+            ctx.lineWidth = 1;
+            for (var i = 0; i < L; i++) {
+                var sx = this._slotX(i);
+                ctx.beginPath(); ctx.arc(sx, this.laneY, r + 2, 0, Math.PI * 2); ctx.stroke();
+            }
+
+            // gate — a vertical bar with a small aperture the dots pass through
+            var flashAge = this._wallClock - this._gateFlashAt;
+            var flashing = flashAge >= 0 && flashAge < 0.1;
+            ctx.strokeStyle = flashing ? 'rgba(255,255,255,0.9)' : 'rgba(139,160,189,0.6)';
+            ctx.lineWidth = flashing ? 3 : 2;
+            var gx = Math.round(this.gateX) + 0.5;
+            ctx.beginPath();
+            ctx.moveTo(gx, this.laneY - this.h * 0.32);
+            ctx.lineTo(gx, this.laneY - r - 3);
+            ctx.moveTo(gx, this.laneY + r + 3);
+            ctx.lineTo(gx, this.laneY + this.h * 0.32);
+            ctx.stroke();
+
+            this.pool.draw(ctx);
+        };
+
         var STRIP_COLORS = { accept: '#34d399', reject: '#f87171', out: '#38bdf8' };
         function stateColor(st) {
             return st === 'accepting' ? '#34d399' : st === 'throttling' ? '#fbbf24' : '#f87171';
@@ -624,6 +738,18 @@
                     getL: function () { return cfg.limit; },
                     getTokens: function () { return l.tokens; }
                 });
+            } else if (l.hasChamber === 'queue') {
+                l.chamber = new QueueChamber(p.querySelector('[data-chamber]'), {
+                    getW: function () { return cfg.window; },
+                    getL: function () { return cfg.limit; }
+                });
+                // The limiter's gate timer (tick()) fires this the instant it
+                // releases the real queue's front — the chamber's visual queue
+                // and the strip's "out" row both key off this same true event.
+                l._onDepart = function (departSimTime) {
+                    l.chamber.releaseFront();
+                    l.strip.pushOut(departSimTime);
+                };
             }
         });
 
@@ -663,10 +789,10 @@
                 var ok = l.accept();
                 if (ok) { l.acc++; } else { l.rej++; }
                 l.strip.pushIn(now, ok ? 'accept' : 'reject');
-                // Departure timing: for these three, accept == depart. Leaky bucket
-                // gets its own true departure tick once it becomes a discrete queue
-                // (Phase 4) — until then it also departs at the accept instant.
-                if (ok) l.strip.pushOut(now);
+                // Departure timing: for these three, accept == depart. Leaky
+                // bucket's real departure happens later, via its gate metronome
+                // (wired through _onDepart) — that's the whole point of it.
+                if (ok && l.hasChamber !== 'queue') l.strip.pushOut(now);
                 // Timeline chambers stack each accepted dot into a slot —
                 // currentSlot() reads state that accept() already updated above.
                 // Not every chamber type uses a slot (the jar derives coin
