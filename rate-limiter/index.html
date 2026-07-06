@@ -648,21 +648,33 @@
             return st === 'accepting' ? '#34d399' : st === 'throttling' ? '#fbbf24' : '#f87171';
         }
 
-        function recentAcceptPct(l, look) {
+        // Time-based lookback (not event-count-based): at low arrival rates, a
+        // fixed "last N events" window can take far longer than a few seconds
+        // to flush stale data after traffic drops. A few sim-seconds recovers
+        // at a consistent, rate-independent pace.
+        var RECENT_WINDOW_SEC = 3;
+        function recentAcceptPct(l, simNow) {
             var evs = l.strip.inEvents;
-            var n = evs.length;
-            var span = Math.min(look, n);
-            if (!span) return 100;
-            var ok = 0;
-            for (var i = n - span; i < n; i++) if (evs[i].kind === 'accept') ok++;
-            return Math.round(ok / span * 100);
+            var cutoff = simNow - RECENT_WINDOW_SEC;
+            var total = 0, ok = 0;
+            for (var i = evs.length - 1; i >= 0 && evs[i].t >= cutoff; i--) {
+                total++;
+                if (evs[i].kind === 'accept') ok++;
+            }
+            if (!total) return 100;
+            return Math.round(ok / total * 100);
         }
 
         // Stable state read: smoothed headroom + recent reject fraction, so badges don't flicker.
-        function stateOf(l) {
-            var evs = l.strip.inEvents, n = evs.length, look = Math.min(12, n), rej = 0;
-            for (var i = n - look; i < n; i++) if (evs[i].kind === 'reject') rej++;
-            var rf = look ? rej / look : 0;
+        function stateOf(l, simNow) {
+            var evs = l.strip.inEvents;
+            var cutoff = simNow - RECENT_WINDOW_SEC;
+            var total = 0, rej = 0;
+            for (var i = evs.length - 1; i >= 0 && evs[i].t >= cutoff; i--) {
+                total++;
+                if (evs[i].kind === 'reject') rej++;
+            }
+            var rf = total ? rej / total : 0;
             var h = (l.hEMA == null) ? 1 : l.hEMA;
             if (rf >= 0.35) return 'dropping';
             if (rf >= 0.1 || h < 0.35) return 'throttling';
@@ -839,7 +851,7 @@
                 var l = limiters[i];
                 var h = R.clamp01(l.head());
                 l.hEMA = (l.hEMA == null) ? h : l.hEMA + (h - l.hEMA) * 0.06;
-                var st = stateOf(l);
+                var st = stateOf(l, now);
                 var col = stateColor(st);
 
                 if (l.el.fill) { l.el.fill.style.width = (h * 100).toFixed(1) + '%'; l.el.fill.style.background = col; }
@@ -852,7 +864,7 @@
                 if (l.el.win && l.windowProgress) l.el.win.style.width = (l.windowProgress() * 100).toFixed(1) + '%';
                 if (l.chamber) l.chamber.draw(now);
 
-                var pct = recentAcceptPct(l, 24);
+                var pct = recentAcceptPct(l, now);
                 l.el.rate.textContent = pct + '%';
                 l.el.acc.textContent = l.acc;
                 l.el.rej.textContent = l.rej;

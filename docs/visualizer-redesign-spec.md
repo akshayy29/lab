@@ -1,8 +1,15 @@
 # Rate limiter visualizer redesign — design & implementation spec
 
-**Status:** approved direction, not yet implemented
+**Status:** implemented — all 6 phases shipped (2026-07-06)
 **Owner:** Akshay · **Spec version:** 1.0 (2026-07-06)
 **Applies to:** `rate-limiter/index.html`, `assets/lab.js`, `assets/lab.css`
+
+**Implementation notes (deltas from spec during build):**
+- §3.2 sliding window: implemented exactly as specified — true sliding log, verified with a deterministic burst-across-boundary test to never exceed L accepts in any W-second span, while fixed window (by contrast) hit 2L, exactly as predicted.
+- §3.4 leaky bucket: implemented exactly as specified — discrete FIFO queue + gate metronome, verified to release at precisely W/L-second intervals regardless of arrival burstiness, and to not "bank" leak credit while idle.
+- §11 verification surfaced one real bug beyond what the checklist anticipated: `stateOf()`/`recentAcceptPct()` originally used a **count**-based lookback ("last 12/24 events"), which at low arrival rates took far longer than "a few seconds" to flush stale data after an overload cleared — badges could stay stuck on DROPPING well past recovery. Fixed by switching both to a **time**-based lookback (last 3 sim-seconds, using the timestamps `TimeStrip` already tracks), which recovers at a consistent pace regardless of rate.
+- A real bug in Phase 1 (accepted dots not being retired from the pool after landing, leaving them frozen at the playhead) was caught during verification and fixed before commit — see the Phase 1 commit message.
+- A pre-existing display inconsistency (chip rounding vs status flooring token counts, occasionally showing contradictory numbers) was caught and fixed in Phase 3.
 
 ---
 
