@@ -142,7 +142,7 @@
 
         function fixedWindow() {
             return {
-                name: 'Fixed window', note: 'simplest, 2× burst at edges', hasWindow: true,
+                name: 'Fixed window', note: 'simplest, 2× burst at edges', hasChamber: 'grid',
                 how: 'Counts requests inside the current <b>W-second window</b>. Once the count hits the limit, extra requests are dropped until the clock ticks into the next window and the counter <b>resets to zero</b>. Cheap — one integer per client — but the abrupt reset is its weakness.',
                 count: 0, elapsed: 0,
                 reset: function () { this.count = 0; this.elapsed = 0; },
@@ -251,6 +251,135 @@
         var limiters = [fixedWindow(), slidingWindow(), tokenBucket(), leakyBucket()];
         limiters.forEach(function (l) { l.acc = 0; l.rej = 0; l.hEMA = null; });
 
+        /**
+         * Scrolling timeline chamber shared by the two window algorithms.
+         * "Now" sits at a fixed playhead (65% width); the world scrolls left as
+         * sim time advances. Fixed window overlays a boundary grid where landed
+         * dots stack per-window-segment (mode 'grid'); sliding window overlays a
+         * trailing lens instead (mode 'lens', added in Phase 2).
+         *
+         * Motion is wall-clock (spec §2.3): flight/reject durations never scale
+         * with playback speed, only the world-scroll rate (driven by simNow) does.
+         */
+        function TimelineChamber(canvas, opts) {
+            this.canvas = canvas;
+            this.ctx = canvas.getContext('2d');
+            this.mode = opts.mode;
+            this.getW = opts.getW;
+            this.getL = opts.getL;
+            this.pool = new R.DotPool(30); // per-chamber budget; 4 chambers ≈ 120 page-wide (spec §6)
+            this.landed = [];              // grid mode: {simT, slot}
+            this._lastWinIdx = null;
+            this._wallClock = 0;
+            this._flashAt = -Infinity;
+            this._resize();
+            var self = this;
+            window.addEventListener('resize', function () { self._resize(); });
+        }
+        TimelineChamber.prototype._resize = function () {
+            var dpr = Math.min(window.devicePixelRatio || 1, 2);
+            var r = this.canvas.getBoundingClientRect();
+            this.canvas.width = Math.max(1, r.width * dpr);
+            this.canvas.height = Math.max(1, r.height * dpr);
+            this.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+            this.w = r.width; this.h = r.height;
+            this.playheadX = this.w * 0.65;
+        };
+        TimelineChamber.prototype.pxPerSimSecond = function () {
+            var W = this.getW();
+            return Math.min(this.w / (2.5 * W), 220);
+        };
+        TimelineChamber.prototype._dotRadius = function () {
+            var base = window.innerWidth < 640 ? 4 : 5;
+            var slotH = this.h / this.getL();
+            return Math.max(2, Math.min(base, slotH / 2 - 1));
+        };
+        TimelineChamber.prototype._slotY = function (slot) {
+            var L = this.getL();
+            var slotH = this.h / L;
+            return this.h - (slot + 1) * slotH + slotH / 2;
+        };
+        // slot: 0-based stack position within the current window (grid mode only)
+        // delay: wall-clock seconds before the flight begins (bursts fan out, spec §5.1)
+        TimelineChamber.prototype.onArrival = function (ok, simNow, slot, delay) {
+            var self = this;
+            var landY = ok ? this._slotY(slot) : this.h / 2;
+            var dot = new R.Dot({ x0: 0, y0: landY, x1: this.playheadX, y1: landY, r: this._dotRadius(), color: '#38bdf8', flightDur: 0.3, delay: delay || 0 });
+            dot.onLanded = function () {
+                if (ok) {
+                    // Ownership transfers to the chamber's own scrolling world —
+                    // retire the pool sprite so it doesn't sit frozen at the playhead.
+                    self.landed.push({ simT: simNow, slot: slot });
+                    dot.instantComplete();
+                } else {
+                    dot.reject('#f87171');
+                }
+            };
+            this.pool.spawn(dot);
+        };
+        TimelineChamber.prototype.update = function (simNow, wallDt) {
+            this._wallClock += wallDt;
+            this.pool.update(wallDt);
+            var W = this.getW();
+            var winIdx = Math.floor(simNow / W);
+            if (this._lastWinIdx !== null && winIdx !== this._lastWinIdx) this._flashAt = this._wallClock;
+            this._lastWinIdx = winIdx;
+            var ppss = this.pxPerSimSecond();
+            for (var i = this.landed.length - 1; i >= 0; i--) {
+                var x = this.playheadX + (this.landed[i].simT - simNow) * ppss;
+                if (x < -12) this.landed.splice(i, 1);
+            }
+        };
+        TimelineChamber.prototype.reset = function () {
+            this.landed = []; this._lastWinIdx = null; this._flashAt = -Infinity; this._wallClock = 0;
+            this.pool.clear();
+        };
+        TimelineChamber.prototype.draw = function (simNow) {
+            var ctx = this.ctx, W = this.getW();
+            var ppss = this.pxPerSimSecond();
+            ctx.clearRect(0, 0, this.w, this.h);
+
+            if (this.mode === 'grid') {
+                var backSec = this.playheadX / ppss;
+                var fwdSec = (this.w - this.playheadX) / ppss;
+                var kStart = Math.floor((simNow - backSec) / W) - 1;
+                var kEnd = Math.ceil((simNow + fwdSec) / W) + 1;
+                ctx.strokeStyle = 'rgba(139,160,189,0.28)';
+                ctx.lineWidth = 1;
+                for (var k = kStart; k <= kEnd; k++) {
+                    var bt = k * W;
+                    var x = this.playheadX + (bt - simNow) * ppss;
+                    if (x < -2 || x > this.w + 2) continue;
+                    ctx.beginPath(); ctx.moveTo(Math.round(x) + 0.5, 0); ctx.lineTo(Math.round(x) + 0.5, this.h); ctx.stroke();
+                }
+                var flashAge = this._wallClock - this._flashAt;
+                if (flashAge >= 0 && flashAge < 0.15 && this._lastWinIdx !== null) {
+                    var alpha = 1 - flashAge / 0.15;
+                    var fbt = this._lastWinIdx * W;
+                    var fx = this.playheadX + (fbt - simNow) * ppss;
+                    ctx.fillStyle = 'rgba(255,255,255,' + (alpha * 0.4).toFixed(2) + ')';
+                    ctx.fillRect(fx - 1, 0, 3, this.h);
+                }
+            }
+
+            // playhead ("now") marker
+            ctx.fillStyle = 'rgba(56,189,248,0.55)';
+            ctx.fillRect(Math.round(this.playheadX) - 0.5, 0, 1, this.h);
+
+            // landed history (world-scrolled)
+            var r = this._dotRadius();
+            ctx.fillStyle = '#34d399';
+            for (var i2 = 0; i2 < this.landed.length; i2++) {
+                var d = this.landed[i2];
+                var lx = this.playheadX + (d.simT - simNow) * ppss;
+                var ly = this._slotY(d.slot);
+                ctx.beginPath(); ctx.arc(lx, ly, r, 0, Math.PI * 2); ctx.fill();
+            }
+
+            // in-flight / rejecting dots
+            this.pool.draw(ctx);
+        };
+
         var STRIP_COLORS = { accept: '#34d399', reject: '#f87171', out: '#38bdf8' };
         function stateColor(st) {
             return st === 'accepting' ? '#34d399' : st === 'throttling' ? '#fbbf24' : '#f87171';
@@ -292,9 +421,13 @@
                 '<div class="how" data-how hidden>' + l.how + '</div>' +
                 '<div class="panel-body">' +
                 '<div class="panel-viz">' +
-                '<div class="gauge-label"><span data-gauge></span><span class="gauge-sub" data-sub></span></div>' +
-                '<div class="gauge"><div class="gauge-fill" data-fill></div></div>' +
-                (l.hasWindow ? '<div class="wintimer"><div class="wintimer-fill" data-win></div></div>' : '') +
+                (l.hasChamber ?
+                    '<div class="chamber-wrap"><canvas class="chamber" data-chamber></canvas><div class="chamber-chip" data-gauge></div></div>'
+                    :
+                    '<div class="gauge-label"><span data-gauge></span><span class="gauge-sub" data-sub></span></div>' +
+                    '<div class="gauge"><div class="gauge-fill" data-fill></div></div>' +
+                    (l.hasWindow ? '<div class="wintimer"><div class="wintimer-fill" data-win></div></div>' : '')
+                ) +
                 '<div class="panel-status"><span class="st-dot" data-stdot></span><span data-status></span></div>' +
                 '</div>' +
                 '<div class="panel-readout">' +
@@ -329,6 +462,14 @@
                 infoBtn.setAttribute('aria-expanded', open ? 'true' : 'false');
             });
             l.strip = new R.TimeStrip(p.querySelector('[data-strip]'), { span: 30 });
+
+            if (l.hasChamber) {
+                l.chamber = new TimelineChamber(p.querySelector('[data-chamber]'), {
+                    mode: l.hasChamber,
+                    getW: function () { return cfg.window; },
+                    getL: function () { return cfg.limit; }
+                });
+            }
         });
 
         /* --- Build scoreboard (glanceable comparison, click to jump) --- */
@@ -357,7 +498,11 @@
         function schedule() { nextArrival = now + nextGap(); }
         schedule();
 
-        function fireArrival() {
+        // burstIdx: when firing a burst, each request in the batch is offset by
+        // 25ms wall-clock so the chamber animation reads as a stream, not a
+        // blob — the decision itself still happens at the same sim instant.
+        function fireArrival(burstIdx) {
+            var delay = burstIdx ? burstIdx * 0.025 : 0;
             for (var i = 0; i < limiters.length; i++) {
                 var l = limiters[i];
                 var ok = l.accept();
@@ -367,6 +512,10 @@
                 // gets its own true departure tick once it becomes a discrete queue
                 // (Phase 4) — until then it also departs at the accept instant.
                 if (ok) l.strip.pushOut(now);
+                // Fixed window's chamber stacks each accepted dot into its slot
+                // within the current window segment — `l.count` already reflects
+                // this arrival's outcome since accept() ran just above.
+                if (l.chamber) l.chamber.onArrival(ok, now, ok ? l.count - 1 : null, delay);
             }
         }
 
@@ -376,6 +525,10 @@
             for (var i = 0; i < limiters.length; i++) limiters[i].tick(s);
             var guard = 0;
             while (now >= nextArrival && guard < 500) { fireArrival(); schedule(); guard++; }
+            // Chamber animation is wall-clock driven (dt, unscaled) — see spec §2.3.
+            for (var j = 0; j < limiters.length; j++) {
+                if (limiters[j].chamber) limiters[j].chamber.update(now, dt);
+            }
             render();
         }
 
@@ -405,15 +558,15 @@
                 var st = stateOf(l);
                 var col = stateColor(st);
 
-                l.el.fill.style.width = (h * 100).toFixed(1) + '%';
-                l.el.fill.style.background = col;
+                if (l.el.fill) { l.el.fill.style.width = (h * 100).toFixed(1) + '%'; l.el.fill.style.background = col; }
                 l.el.gauge.textContent = l.gauge();
-                l.el.sub.textContent = l.sub();
+                if (l.el.sub) l.el.sub.textContent = l.sub();
                 l.el.status.textContent = l.status();
                 l.el.stdot.style.background = col;
                 l.el.badge.textContent = st.toUpperCase();
                 l.el.badge.className = 'state-badge ' + st;
                 if (l.el.win && l.windowProgress) l.el.win.style.width = (l.windowProgress() * 100).toFixed(1) + '%';
+                if (l.chamber) l.chamber.draw(now);
 
                 var pct = recentAcceptPct(l, 24);
                 l.el.rate.textContent = pct + '%';
@@ -453,7 +606,7 @@
         });
 
         document.getElementById('burst').addEventListener('click', function () {
-            for (var i = 0; i < 20; i++) fireArrival();
+            for (var i = 0; i < 20; i++) fireArrival(i);
             render();
         });
 
@@ -464,7 +617,10 @@
         });
 
         document.getElementById('reset').addEventListener('click', function () {
-            limiters.forEach(function (l) { l.reset(); l.acc = 0; l.rej = 0; l.hEMA = null; l.strip.clear(); });
+            limiters.forEach(function (l) {
+                l.reset(); l.acc = 0; l.rej = 0; l.hEMA = null; l.strip.clear();
+                if (l.chamber) l.chamber.reset();
+            });
             now = 0; schedule(); render();
         });
 

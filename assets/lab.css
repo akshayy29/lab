@@ -359,6 +359,37 @@ button.ghost { background: transparent; }
     padding-left: 1.25rem;
 }
 .stat-label { font-size: 0.72rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; }
+
+/* Chamber — the animated per-algorithm mechanism visual (spec: rate-limiter/docs) */
+.chamber-wrap {
+    position: relative;
+    width: 100%;
+    height: 140px;
+    border-radius: 6px;
+    overflow: hidden;
+}
+.chamber {
+    display: block;
+    width: 100%;
+    height: 100%;
+    background: var(--surface-2);
+}
+.chamber-chip {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    background: rgba(17, 28, 49, 0.82);
+    color: var(--muted);
+    font-family: var(--mono);
+    font-size: 0.72rem;
+    padding: 3px 8px;
+    border-radius: 4px;
+    pointer-events: none;
+    white-space: nowrap;
+}
+@media (max-width: 640px) {
+    .chamber-wrap { height: 120px; }
+}
 .panel-head { display: flex; flex-direction: row; align-items: flex-start; gap: 0.7rem; }
 .panel-titles { display: flex; flex-direction: column; gap: 0.15rem; flex: 1; min-width: 0; }
 .panel-name { font-weight: 600; font-size: 0.98rem; }

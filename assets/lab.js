@@ -142,6 +142,7 @@
             this.t = 0;
             this.flightDur = opts.flightDur != null ? opts.flightDur : 0.3;
             this.onLanded = opts.onLanded || null;
+            this.delay = opts.delay || 0; // wall-clock seconds before flight begins (burst fan-out, spec §5.1)
         }
         retarget(x, y, dur) {
             this._tx0 = this.x; this._ty0 = this.y;
@@ -172,6 +173,12 @@
         }
         instantComplete() { this.alpha = 0; this.state = 'dead'; }
         update(dt) {
+            if (this.delay > 0) {
+                this.delay -= dt;
+                if (this.delay > 0) return true;
+                dt = -this.delay; // leftover carries into this frame's motion, delay fully consumed
+                this.delay = 0;
+            }
             this.t += dt;
             if (this.state === 'flight' || this.state === 'retarget') {
                 const from = this.state === 'retarget' ? { x: this._tx0, y: this._ty0 } : { x: this.x0, y: this.y0 };
@@ -205,7 +212,7 @@
             return false;
         }
         draw(ctx) {
-            if (this.state === 'dead') return;
+            if (this.state === 'dead' || this.delay > 0) return;
             ctx.globalAlpha = this.alpha;
             ctx.fillStyle = this.color;
             ctx.beginPath();
