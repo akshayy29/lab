@@ -251,25 +251,25 @@
         var limiters = [fixedWindow(), slidingWindow(), tokenBucket(), leakyBucket()];
         limiters.forEach(function (l) { l.acc = 0; l.rej = 0; l.hEMA = null; });
 
-        var STRIP_COLORS = { accept: '#34d399', reject: '#f87171' };
+        var STRIP_COLORS = { accept: '#34d399', reject: '#f87171', out: '#38bdf8' };
         function stateColor(st) {
             return st === 'accepting' ? '#34d399' : st === 'throttling' ? '#fbbf24' : '#f87171';
         }
 
         function recentAcceptPct(l, look) {
-            var evs = l.strip.events;
+            var evs = l.strip.inEvents;
             var n = evs.length;
             var span = Math.min(look, n);
             if (!span) return 100;
             var ok = 0;
-            for (var i = n - span; i < n; i++) if (evs[i] === 'accept') ok++;
+            for (var i = n - span; i < n; i++) if (evs[i].kind === 'accept') ok++;
             return Math.round(ok / span * 100);
         }
 
         // Stable state read: smoothed headroom + recent reject fraction, so badges don't flicker.
         function stateOf(l) {
-            var evs = l.strip.events, n = evs.length, look = Math.min(12, n), rej = 0;
-            for (var i = n - look; i < n; i++) if (evs[i] === 'reject') rej++;
+            var evs = l.strip.inEvents, n = evs.length, look = Math.min(12, n), rej = 0;
+            for (var i = n - look; i < n; i++) if (evs[i].kind === 'reject') rej++;
             var rf = look ? rej / look : 0;
             var h = (l.hEMA == null) ? 1 : l.hEMA;
             if (rf >= 0.35) return 'dropping';
@@ -303,8 +303,11 @@
                 '<span class="stat-sub"><b data-acc>0</b> ok · <b data-rej>0</b> dropped</span>' +
                 '</div>' +
                 '</div>' +
+                '<div class="strip-row">' +
+                '<div class="strip-labels"><span>in</span><span>out</span></div>' +
                 '<canvas class="strip" data-strip></canvas>' +
-                '<div class="strip-caption">recent requests →</div>';
+                '</div>' +
+                '<div class="strip-caption">last 30s — in vs out →</div>';
             panelsEl.appendChild(p);
             l.el = {
                 badge: p.querySelector('[data-badge]'),
@@ -325,7 +328,7 @@
                 if (open) { howEl.removeAttribute('hidden'); } else { howEl.setAttribute('hidden', ''); }
                 infoBtn.setAttribute('aria-expanded', open ? 'true' : 'false');
             });
-            l.strip = new R.Strip(p.querySelector('[data-strip]'), { max: 160 });
+            l.strip = new R.TimeStrip(p.querySelector('[data-strip]'), { span: 30 });
         });
 
         /* --- Build scoreboard (glanceable comparison, click to jump) --- */
@@ -359,7 +362,11 @@
                 var l = limiters[i];
                 var ok = l.accept();
                 if (ok) { l.acc++; } else { l.rej++; }
-                l.strip.push(ok ? 'accept' : 'reject');
+                l.strip.pushIn(now, ok ? 'accept' : 'reject');
+                // Departure timing: for these three, accept == depart. Leaky bucket
+                // gets its own true departure tick once it becomes a discrete queue
+                // (Phase 4) — until then it also departs at the accept instant.
+                if (ok) l.strip.pushOut(now);
             }
         }
 
@@ -412,7 +419,7 @@
                 l.el.rate.textContent = pct + '%';
                 l.el.acc.textContent = l.acc;
                 l.el.rej.textContent = l.rej;
-                l.strip.draw(STRIP_COLORS);
+                l.strip.draw(now, STRIP_COLORS);
 
                 l.score.dot.style.background = col;
                 l.score.rate.textContent = pct + '%';

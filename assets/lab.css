@@ -447,6 +447,19 @@ button.ghost { background: transparent; }
 .stat-sub { font-family: var(--mono); font-size: 0.76rem; color: var(--muted); margin-top: 0.35rem; }
 .stat-sub b { color: var(--text); }
 
+.strip-row { display: flex; align-items: stretch; gap: 0.55rem; }
+.strip-labels {
+    display: flex;
+    flex-direction: column;
+    justify-content: space-around;
+    flex-shrink: 0;
+    font-family: var(--mono);
+    font-size: 0.62rem;
+    color: var(--faint);
+    text-align: right;
+    padding: 4px 0;
+}
+
 .strip {
     width: 100%;
     height: 46px;
