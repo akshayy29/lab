@@ -98,8 +98,8 @@
                     </tr>
                     <tr>
                         <td>Sliding window</td>
-                        <td>Weighted count over the trailing window — no edge burst.</td>
-                        <td>More state and arithmetic per request than a fixed counter.</td>
+                        <td>Exact count over a trailing window — no edge burst.</td>
+                        <td>Stores a timestamp per accepted request — more memory than a single counter.</td>
                     </tr>
                     <tr>
                         <td>Token bucket</td>
@@ -154,6 +154,7 @@
                     if (this.count < cfg.limit) { this.count += 1; return true; }
                     return false;
                 },
+                currentSlot: function () { return this.count - 1; },
                 head: function () { return (cfg.limit - this.count) / cfg.limit; },
                 gauge: function () { return this.count + ' / ' + cfg.limit + ' used'; },
                 sub: function () { return 'resets in ' + (cfg.window - this.elapsed).toFixed(1) + 's'; },
@@ -167,29 +168,27 @@
 
         function slidingWindow() {
             return {
-                name: 'Sliding window', note: 'no edge burst, more state',
-                how: 'Blends the <b>previous window’s count</b> with the current one, weighted by how far into the current window we are. The estimate slides smoothly instead of resetting, so there’s <b>no boundary spike</b> — at the cost of tracking a little more state.',
-                cur: 0, prev: 0, elapsed: 0,
-                reset: function () { this.cur = 0; this.prev = 0; this.elapsed = 0; },
-                tick: function (dt) {
-                    this.elapsed += dt;
-                    while (this.elapsed >= cfg.window) { this.elapsed -= cfg.window; this.prev = this.cur; this.cur = 0; }
-                },
-                weighted: function () {
-                    var frac = this.elapsed / cfg.window;
-                    return this.prev * (1 - frac) + this.cur;
+                name: 'Sliding window', note: 'no edge burst, more state', hasChamber: 'lens',
+                how: 'Stores a timestamp for every accepted request and forgets any older than the trailing <b>W-second window</b>. Because it\'s an exact count over a true rolling window, there\'s <b>no boundary spike</b> — the tradeoff is remembering one timestamp per accepted request instead of a single counter (production systems often use a cheaper weighted-counter approximation instead).',
+                log: [], simNow: 0,
+                reset: function () { this.log = []; this.simNow = 0; },
+                tick: function (dt) { this.simNow += dt; this._prune(); },
+                _prune: function () {
+                    var cutoff = this.simNow - cfg.window;
+                    while (this.log.length && this.log[0] <= cutoff) this.log.shift();
                 },
                 accept: function () {
-                    if (this.weighted() < cfg.limit) { this.cur += 1; return true; }
+                    this._prune();
+                    if (this.log.length < cfg.limit) { this.log.push(this.simNow); return true; }
                     return false;
                 },
-                head: function () { return (cfg.limit - this.weighted()) / cfg.limit; },
-                gauge: function () { return this.weighted().toFixed(1) + ' / ' + cfg.limit + ' weighted'; },
+                currentSlot: function () { return this.log.length - 1; },
+                head: function () { return (cfg.limit - this.log.length) / cfg.limit; },
+                gauge: function () { return this.log.length + ' / ' + cfg.limit + ' in window'; },
                 sub: function () { return ''; },
                 status: function () {
-                    var w = this.weighted();
-                    if (w >= cfg.limit) return 'At the limit — throttling smoothly';
-                    return w.toFixed(1) + ' of ' + cfg.limit + ' over the last ' + cfg.window.toFixed(1) + 's';
+                    if (this.log.length >= cfg.limit) return 'At the limit — throttling smoothly';
+                    return this.log.length + ' of ' + cfg.limit + ' over the last ' + cfg.window.toFixed(1) + 's';
                 }
             };
         }
@@ -360,6 +359,18 @@
                     ctx.fillStyle = 'rgba(255,255,255,' + (alpha * 0.4).toFixed(2) + ')';
                     ctx.fillRect(fx - 1, 0, 3, this.h);
                 }
+            } else if (this.mode === 'lens') {
+                // Trailing edge sits exactly W sim-seconds behind the playhead —
+                // dots that cross it stop counting (see age-based opacity below).
+                var trailX = this.playheadX - W * ppss;
+                var bandX = Math.max(0, trailX);
+                ctx.fillStyle = 'rgba(56,189,248,0.10)';
+                ctx.fillRect(bandX, 0, this.playheadX - bandX, this.h);
+                if (trailX > -2) {
+                    ctx.strokeStyle = 'rgba(56,189,248,0.25)';
+                    ctx.lineWidth = 1;
+                    ctx.beginPath(); ctx.moveTo(Math.round(trailX) + 0.5, 0); ctx.lineTo(Math.round(trailX) + 0.5, this.h); ctx.stroke();
+                }
             }
 
             // playhead ("now") marker
@@ -368,13 +379,17 @@
 
             // landed history (world-scrolled)
             var r = this._dotRadius();
-            ctx.fillStyle = '#34d399';
             for (var i2 = 0; i2 < this.landed.length; i2++) {
                 var d = this.landed[i2];
                 var lx = this.playheadX + (d.simT - simNow) * ppss;
                 var ly = this._slotY(d.slot);
+                // Lens mode: a dot past the trailing edge no longer counts toward
+                // the limit — dim it so that fact is visible, not just implied.
+                ctx.globalAlpha = (this.mode === 'lens' && (simNow - d.simT) > W) ? 0.35 : 1;
+                ctx.fillStyle = '#34d399';
                 ctx.beginPath(); ctx.arc(lx, ly, r, 0, Math.PI * 2); ctx.fill();
             }
+            ctx.globalAlpha = 1;
 
             // in-flight / rejecting dots
             this.pool.draw(ctx);
@@ -512,10 +527,9 @@
                 // gets its own true departure tick once it becomes a discrete queue
                 // (Phase 4) — until then it also departs at the accept instant.
                 if (ok) l.strip.pushOut(now);
-                // Fixed window's chamber stacks each accepted dot into its slot
-                // within the current window segment — `l.count` already reflects
-                // this arrival's outcome since accept() ran just above.
-                if (l.chamber) l.chamber.onArrival(ok, now, ok ? l.count - 1 : null, delay);
+                // Timeline chambers stack each accepted dot into a slot —
+                // currentSlot() reads state that accept() already updated above.
+                if (l.chamber) l.chamber.onArrival(ok, now, ok ? l.currentSlot() : null, delay);
             }
         }
 
